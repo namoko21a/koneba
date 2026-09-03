@@ -1,0 +1,5 @@
+{
+  "deploy": {
+    "start": "python tg_monitor_bot.py"
+  }
+}
