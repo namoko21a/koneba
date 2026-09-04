@@ -41,7 +41,7 @@ LOGIN_HEADERS = {
 
 
 def log(tag: str, msg: str):
-    ts = now_sgt("%H:%M:%S")
+    ts = now_pht("%H:%M:%S")
     print(f"  [{ts}] {tag:<14} {msg}")
 
 
@@ -327,7 +327,7 @@ async def run_cycle(auth_state: dict, cycle: int):
     headers = auth_state["headers"]
 
     async with aiohttp.ClientSession() as session:
-        ts = now_sgt()
+        ts = now_pht()
 
         # saveOpt & phoneAuth handle 406 internally and update auth_state
         (save_opt_sec, ok_save_opt)     = await call_save_opt(session, auth_state)
