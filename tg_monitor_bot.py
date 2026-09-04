@@ -2,8 +2,16 @@ import asyncio
 import json
 import time
 import aiohttp
+from datetime import datetime, timezone, timedelta
 
-INTERVAL   = 30
+PHT = timezone(timedelta(hours=8))  # Philippines Time / Manila (UTC+8)
+
+
+def now_pht(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Return current time formatted in Philippines Time (UTC+8, Manila)."""
+    return datetime.now(PHT).strftime(fmt)
+
+INTERVAL   = 50
 TG_TOKEN   = "8889006993:AAEmCC3idYlvUK1hMP-c2Qtp_U2fGKVKQQo"
 TG_CHAT_ID = "5295241896"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -33,7 +41,7 @@ LOGIN_HEADERS = {
 
 
 def log(tag: str, msg: str):
-    ts = time.strftime("%H:%M:%S")
+    ts = now_sgt("%H:%M:%S")
     print(f"  [{ts}] {tag:<14} {msg}")
 
 
@@ -305,7 +313,7 @@ def print_status_dashboard(cycle: int, statuses: dict):
     line    = "─" * 44
     print(f"\n  {line}")
     print(f"  {'KMPAY STATUS DASHBOARD':^42}")
-    print(f"  Cycle #{cycle}  ·  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Cycle #{cycle}  ·  {now_pht()} PHT")
     print(f"  {line}")
     for name, ok in statuses.items():
         indicator = OK if ok else ERR
@@ -319,7 +327,7 @@ async def run_cycle(auth_state: dict, cycle: int):
     headers = auth_state["headers"]
 
     async with aiohttp.ClientSession() as session:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        ts = now_sgt()
 
         # saveOpt & phoneAuth handle 406 internally and update auth_state
         (save_opt_sec, ok_save_opt)     = await call_save_opt(session, auth_state)
