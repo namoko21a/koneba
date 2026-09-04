@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
 import time
 import aiohttp
+from aiohttp import web
 from datetime import datetime, timezone, timedelta
 
 PHT = timezone(timedelta(hours=8))  # Philippines Time / Manila (UTC+8)
@@ -10,6 +12,18 @@ PHT = timezone(timedelta(hours=8))  # Philippines Time / Manila (UTC+8)
 def now_pht(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     """Return current time formatted in Philippines Time (UTC+8, Manila)."""
     return datetime.now(PHT).strftime(fmt)
+
+
+# ─── Shared in-memory state — updated each cycle, served via /status ───────
+LATEST_DATA: dict = {
+    "cycle":         0,
+    "timestamp":     None,
+    "online":        False,
+    "services":      {"saveOpt": False, "phoneAuth": False},
+    "homepage":      {},
+    "indexInfo":     {},
+    "phoneAccounts": [],
+}
 
 INTERVAL   = 50
 TG_TOKEN   = "8889006993:AAEmCC3idYlvUK1hMP-c2Qtp_U2fGKVKQQo"
@@ -197,9 +211,17 @@ async def call_index_info(
                 f"  Number of personal accounts        :  <b>{d.get('selfAccountNum', 'N/A')}</b>\n"
                 f"  Number of team accounts            :  <b>{d.get('teamAccountNum', 'N/A')}</b>\n"
             )
-            return tg, True
+            data = {
+                "selfIncome":    self_income,
+                "teamIncome":    team_income,
+                "selfOrderQty":  d.get("selfOrderQty", "N/A"),
+                "teamOrderQty":  d.get("teamOrderQty", "N/A"),
+                "selfAccountNum": d.get("selfAccountNum", "N/A"),
+                "teamAccountNum": d.get("teamAccountNum", "N/A"),
+            }
+            return tg, True, data
         except Exception:
-            return f"<b>INDEX INFO</b>  [{status}]\n", False
+            return f"<b>INDEX INFO</b>  [{status}]\n", False, {}
 
 
 async def call_homepage(
@@ -234,9 +256,15 @@ async def call_homepage(
                 "<code>────────────────────────────────</code>\n"
                 f"  Income               :  <b>{income:,.2f}</b>\n"
             )
-            return tg, True
+            data = {
+                "deposit":       avl,
+                "walletBalance": freeze,
+                "totalBalance":  total,
+                "income":        income,
+            }
+            return tg, True, data
         except Exception:
-            return f"<b>HOMEPAGE</b>  [{status}]\n", False
+            return f"<b>HOMEPAGE</b>  [{status}]\n", False, {}
 
 
 PHONE_PAGE_PAYLOAD = {
@@ -299,9 +327,19 @@ async def call_phone_page(
                 "<code>────────────────────────────────</code>\n"
                 + rows
             )
-            return tg, True
+            phone_list = [
+                {
+                    "phone":     item.get("phone", "N/A"),
+                    "bank":      item.get("associatedBank", "N/A"),
+                    "status":    STATUS_MAP.get(item.get("phoneStatusName", ""), item.get("phoneStatusName", "N/A")),
+                    "dayIncome": float(item.get("dayIncome", 0)),
+                    "balance":   float(item.get("actualBalance", 0)),
+                }
+                for item in items
+            ]
+            return tg, True, phone_list
         except Exception:
-            return f"<b>PHONE ACCOUNTS</b>  [{status}]\n", False
+            return f"<b>PHONE ACCOUNTS</b>  [{status}]\n", False, []
 
 
 def print_status_dashboard(cycle: int, statuses: dict):
@@ -337,14 +375,25 @@ async def run_cycle(auth_state: dict, cycle: int):
         headers = auth_state["headers"]
 
         (
-            (index_sec, ok_index),
-            (homepage_sec, ok_homepage),
-            (phone_page_sec, ok_phone_page),
+            (index_sec, ok_index, index_data),
+            (homepage_sec, ok_homepage, homepage_data),
+            (phone_page_sec, ok_phone_page, phone_accounts),
         ) = await asyncio.gather(
             call_index_info(session, auth_state),
             call_homepage(session, auth_state),
             call_phone_page(session, auth_state),
         )
+
+        # Update shared state for the web dashboard
+        LATEST_DATA.update({
+            "cycle":         cycle,
+            "timestamp":     ts,
+            "online":        ok_save_opt and ok_phone_auth,
+            "services":      {"saveOpt": ok_save_opt, "phoneAuth": ok_phone_auth},
+            "homepage":      homepage_data,
+            "indexInfo":     index_data,
+            "phoneAccounts": phone_accounts,
+        })
 
         print_status_dashboard(cycle, {
             "saveOpt     ": ok_save_opt,
@@ -376,6 +425,49 @@ async def run_cycle(auth_state: dict, cycle: int):
     print(f"  Next cycle in {INTERVAL}s...\n")
 
 
+# ─── Web API ────────────────────────────────────────────────────────────────
+
+async def status_handler(request: web.Request) -> web.Response:
+    """GET /status — returns the latest cycle data as JSON."""
+    headers = {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers=headers)
+    return web.Response(
+        text=json.dumps(LATEST_DATA),
+        content_type="application/json",
+        headers=headers,
+    )
+
+
+async def run_web_server():
+    """Run the aiohttp web server alongside the monitoring loop."""
+    app = web.Application()
+    app.router.add_get("/status",  status_handler)
+    app.router.add_options("/status", status_handler)
+    app.router.add_get("/health",  lambda _: web.Response(text="OK"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log("🌐 WEB", f"Status API listening on port {port}  →  /status")
+    await asyncio.sleep(float("inf"))   # keep alive forever
+
+
+# ─── Entry point ────────────────────────────────────────────────────────────
+
+async def monitoring_loop(auth_state: dict):
+    cycle = 0
+    while True:
+        cycle += 1
+        await run_cycle(auth_state, cycle)
+        await asyncio.sleep(INTERVAL)
+
+
 async def main():
     auth_token, device_id = login()
     save_opt, phone_auth  = build_payloads(device_id)
@@ -387,11 +479,11 @@ async def main():
         "phone_auth": phone_auth,
     }
 
-    cycle = 0
-    while True:
-        cycle += 1
-        await run_cycle(auth_state, cycle)
-        await asyncio.sleep(INTERVAL)
+    # Run the monitoring loop AND the web server concurrently
+    await asyncio.gather(
+        monitoring_loop(auth_state),
+        run_web_server(),
+    )
 
 
 if __name__ == "__main__":
