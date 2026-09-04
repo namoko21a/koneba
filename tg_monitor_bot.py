@@ -3,7 +3,7 @@ import json
 import time
 import aiohttp
 
-INTERVAL   = 50
+INTERVAL   = 30
 TG_TOKEN   = "8889006993:AAEmCC3idYlvUK1hMP-c2Qtp_U2fGKVKQQo"
 TG_CHAT_ID = "5295241896"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -68,6 +68,17 @@ def login():
     return auth_token, device_id
 
 
+def re_login(auth_state: dict):
+    """Re-authenticate and refresh auth_state in-place (called on 406)."""
+    log("⚠ RE-LOGIN", "Got 406 — fetching new authorization token...")
+    auth_token, device_id = login()
+    auth_state["headers"]      = build_headers(auth_token, device_id)
+    save_opt, phone_auth       = build_payloads(device_id)
+    auth_state["save_opt"]     = save_opt
+    auth_state["phone_auth"]   = phone_auth
+    log("✓ RE-LOGIN", "New token acquired — resuming.")
+
+
 def build_headers(auth_token: str, device_id: str) -> dict:
     return {
         "User-Agent":      "okhttp/3.12.13",
@@ -99,24 +110,70 @@ def build_payloads(device_id: str) -> tuple:
     return save_opt, phone_auth
 
 
-async def call_save_opt(session: aiohttp.ClientSession, headers: dict, payload: dict) -> tuple:
+async def call_save_opt(
+    session: aiohttp.ClientSession,
+    auth_state: dict,
+) -> tuple:
+    headers = auth_state["headers"]
+    payload = auth_state["save_opt"]
     async with session.post(SAVE_OPT, data=json.dumps(payload), headers=headers) as resp:
-        ok = resp.status == 200
-        tg = f"  saveOpt      :  <b>ONLINE</b>  [{resp.status} OK]\n" if ok else f"  saveOpt      :  [{resp.status}]\n"
+        status = resp.status
+        if status == 406:
+            log("saveOpt", "406 received — re-authenticating...")
+            re_login(auth_state)
+            # Retry once with fresh credentials
+            async with session.post(
+                SAVE_OPT,
+                data=json.dumps(auth_state["save_opt"]),
+                headers=auth_state["headers"],
+            ) as retry:
+                status = retry.status
+        ok = status == 200
+        tg = f"  saveOpt      :  <b>ONLINE</b>  [{status} OK]\n" if ok else f"  saveOpt      :  [{status}]\n"
         return tg, ok
 
 
-async def call_phone_auth(session: aiohttp.ClientSession, headers: dict, payload: dict) -> tuple:
+async def call_phone_auth(
+    session: aiohttp.ClientSession,
+    auth_state: dict,
+) -> tuple:
+    headers = auth_state["headers"]
+    payload = auth_state["phone_auth"]
     async with session.post(PHONE_AUTH, data=json.dumps(payload), headers=headers) as resp:
-        ok = resp.status == 200
-        tg = f"  phoneAuth    :  <b>ONLINE</b>  [{resp.status} OK]\n" if ok else f"  phoneAuth    :  [{resp.status}]\n"
+        status = resp.status
+        if status == 406:
+            log("phoneAuth", "406 received — re-authenticating...")
+            re_login(auth_state)
+            # Retry once with fresh credentials
+            async with session.post(
+                PHONE_AUTH,
+                data=json.dumps(auth_state["phone_auth"]),
+                headers=auth_state["headers"],
+            ) as retry:
+                status = retry.status
+        ok = status == 200
+        tg = f"  phoneAuth    :  <b>ONLINE</b>  [{status} OK]\n" if ok else f"  phoneAuth    :  [{status}]\n"
         return tg, ok
 
 
-async def call_index_info(session: aiohttp.ClientSession, headers: dict) -> tuple:
+async def call_index_info(
+    session: aiohttp.ClientSession,
+    auth_state: dict,
+) -> tuple:
+    headers = auth_state["headers"]
     async with session.get(INDEX_INFO, headers=headers) as resp:
-        text = await resp.text()
+        status = resp.status
+        if status == 406:
+            log("indexInfo", "406 received — re-authenticating...")
+            re_login(auth_state)
+            async with session.get(INDEX_INFO, headers=auth_state["headers"]) as retry:
+                status = retry.status
+                text   = await retry.text()
+        else:
+            text = await resp.text()
         try:
+            if status != 200:
+                raise ValueError(f"status {status}")
             d           = json.loads(text).get("data", {})
             self_income = float(d.get("selfIncome", 0))
             team_income = float(d.get("teamIncome", 0))
@@ -134,13 +191,27 @@ async def call_index_info(session: aiohttp.ClientSession, headers: dict) -> tupl
             )
             return tg, True
         except Exception:
-            return f"<b>INDEX INFO</b>  [{resp.status}]\n"
+            return f"<b>INDEX INFO</b>  [{status}]\n", False
 
 
-async def call_homepage(session: aiohttp.ClientSession, headers: dict) -> tuple:
+async def call_homepage(
+    session: aiohttp.ClientSession,
+    auth_state: dict,
+) -> tuple:
+    headers = auth_state["headers"]
     async with session.post(HOMEPAGE, headers=headers) as resp:
-        text = await resp.text()
+        status = resp.status
+        if status == 406:
+            log("homepage", "406 received — re-authenticating...")
+            re_login(auth_state)
+            async with session.post(HOMEPAGE, headers=auth_state["headers"]) as retry:
+                status = retry.status
+                text   = await retry.text()
+        else:
+            text = await resp.text()
         try:
+            if status != 200:
+                raise ValueError(f"status {status}")
             d      = json.loads(text).get("data", {})
             avl    = float(d.get("avlBalance", 0))
             freeze = float(d.get("freezeBalance", 0))
@@ -157,7 +228,7 @@ async def call_homepage(session: aiohttp.ClientSession, headers: dict) -> tuple:
             )
             return tg, True
         except Exception:
-            return f"<b>HOMEPAGE</b>  [{resp.status}]\n"
+            return f"<b>HOMEPAGE</b>  [{status}]\n", False
 
 
 PHONE_PAGE_PAYLOAD = {
@@ -169,10 +240,28 @@ PHONE_PAGE_PAYLOAD = {
 }
 
 
-async def call_phone_page(session: aiohttp.ClientSession, headers: dict) -> tuple:
+async def call_phone_page(
+    session: aiohttp.ClientSession,
+    auth_state: dict,
+) -> tuple:
+    headers = auth_state["headers"]
     async with session.post(PHONE_PAGE, data=json.dumps(PHONE_PAGE_PAYLOAD), headers=headers) as resp:
-        text = await resp.text()
+        status = resp.status
+        if status == 406:
+            log("phonePage", "406 received — re-authenticating...")
+            re_login(auth_state)
+            async with session.post(
+                PHONE_PAGE,
+                data=json.dumps(PHONE_PAGE_PAYLOAD),
+                headers=auth_state["headers"],
+            ) as retry:
+                status = retry.status
+                text   = await retry.text()
+        else:
+            text = await resp.text()
         try:
+            if status != 200:
+                raise ValueError(f"status {status}")
             STATUS_MAP = {
                 "啟用": "enabled",
                 "停用": "disabled",
@@ -185,12 +274,12 @@ async def call_phone_page(session: aiohttp.ClientSession, headers: dict) -> tupl
                 phone      = item.get("phone", "N/A")
                 bank       = item.get("associatedBank", "N/A")
                 raw_status = item.get("phoneStatusName", "N/A")
-                status     = STATUS_MAP.get(raw_status, raw_status)
+                ph_status  = STATUS_MAP.get(raw_status, raw_status)
                 day_income = float(item.get("dayIncome", 0))
                 balance    = float(item.get("actualBalance", 0))
                 rows += (
                     f"  📱 <b>{phone}</b>  [{bank}]\n"
-                    f"     Status      :  <b>{status}</b>\n"
+                    f"     Status      :  <b>{ph_status}</b>\n"
                     f"     Day Income  :  <b>{day_income:,.2f}</b>\n"
                     f"     Balance     :  <b>{balance:,.2f}</b>\n"
                     f"<code>────────────────────────────────</code>\n"
@@ -204,7 +293,7 @@ async def call_phone_page(session: aiohttp.ClientSession, headers: dict) -> tupl
             )
             return tg, True
         except Exception:
-            return f"<b>PHONE ACCOUNTS</b>  [{resp.status}]\n"
+            return f"<b>PHONE ACCOUNTS</b>  [{status}]\n", False
 
 
 def print_status_dashboard(cycle: int, statuses: dict):
@@ -226,23 +315,27 @@ def print_status_dashboard(cycle: int, statuses: dict):
     print(f"  {line}\n")
 
 
-async def run_cycle(headers: dict, save_opt_payload: dict, phone_auth_payload: dict, cycle: int):
+async def run_cycle(auth_state: dict, cycle: int):
+    headers = auth_state["headers"]
 
     async with aiohttp.ClientSession() as session:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
+        # saveOpt & phoneAuth handle 406 internally and update auth_state
+        (save_opt_sec, ok_save_opt)     = await call_save_opt(session, auth_state)
+        (phone_auth_sec, ok_phone_auth) = await call_phone_auth(session, auth_state)
+
+        # Refresh headers in case re-login happened
+        headers = auth_state["headers"]
+
         (
-            (save_opt_sec, ok_save_opt),
-            (phone_auth_sec, ok_phone_auth),
             (index_sec, ok_index),
             (homepage_sec, ok_homepage),
             (phone_page_sec, ok_phone_page),
         ) = await asyncio.gather(
-            call_save_opt(session, headers, save_opt_payload),
-            call_phone_auth(session, headers, phone_auth_payload),
-            call_index_info(session, headers),
-            call_homepage(session, headers),
-            call_phone_page(session, headers),
+            call_index_info(session, auth_state),
+            call_homepage(session, auth_state),
+            call_phone_page(session, auth_state),
         )
 
         print_status_dashboard(cycle, {
@@ -277,13 +370,19 @@ async def run_cycle(headers: dict, save_opt_payload: dict, phone_auth_payload: d
 
 async def main():
     auth_token, device_id = login()
-    headers            = build_headers(auth_token, device_id)
-    save_opt, phone_auth = build_payloads(device_id)
+    save_opt, phone_auth  = build_payloads(device_id)
+
+    # Shared mutable state — updated in-place on every re-login
+    auth_state = {
+        "headers":    build_headers(auth_token, device_id),
+        "save_opt":   save_opt,
+        "phone_auth": phone_auth,
+    }
 
     cycle = 0
     while True:
         cycle += 1
-        await run_cycle(headers, save_opt, phone_auth, cycle)
+        await run_cycle(auth_state, cycle)
         await asyncio.sleep(INTERVAL)
 
 
