@@ -25,7 +25,7 @@ LATEST_DATA: dict = {
     "phoneAccounts": [],
 }
 
-INTERVAL   = 50
+INTERVAL   = 30
 TG_TOKEN   = "8889006993:AAEmCC3idYlvUK1hMP-c2Qtp_U2fGKVKQQo"
 TG_CHAT_ID = "5295241896"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
