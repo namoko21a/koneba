@@ -501,6 +501,18 @@ async def telegram_command_loop():
     global monitoring_active, _last_update_id
     log("🤖 TG CMD", "Command listener started — send /s to run, /f to stop")
     async with aiohttp.ClientSession() as session:
+        # ── Delete any stale webhook so getUpdates can receive messages ──
+        try:
+            del_url = f"https://api.telegram.org/bot{TG_TOKEN}/deleteWebhook?drop_pending_updates=true"
+            async with session.get(del_url) as r:
+                result = await r.json()
+                if result.get("result"):
+                    log("🤖 TG CMD", "Webhook deleted — long-polling active")
+                else:
+                    log("🤖 TG CMD", f"deleteWebhook: {result}")
+        except Exception as e:
+            log("🤖 TG CMD", f"Could not delete webhook: {e}")
+
         while True:
             try:
                 params = {"timeout": 20, "offset": _last_update_id + 1}
