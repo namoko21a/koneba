@@ -497,9 +497,9 @@ async def tg_reply(session: aiohttp.ClientSession, chat_id, text: str):
 
 
 async def telegram_command_loop():
-    """Poll Telegram for /start and /stop commands from the owner chat."""
+    """Poll Telegram for /s and /f commands from the owner chat."""
     global monitoring_active, _last_update_id
-    log("🤖 TG CMD", "Command listener started — send /start or /stop")
+    log("🤖 TG CMD", "Command listener started — send /s to run, /f to stop")
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -522,30 +522,30 @@ async def telegram_command_loop():
                         if chat_id != TG_CHAT_ID:
                             continue
 
-                        if text in ("/start", "/start@" + TG_TOKEN.split(":")[0]):
+                        if text in ("/s", "/s@" + TG_TOKEN.split(":")[0]):
                             if monitoring_active:
                                 await tg_reply(session, chat_id,
                                     "⚠️ <b>Monitor is already running.</b>\n"
-                                    "Send /stop to pause it.")
+                                    "Send /f to stop it.")
                             else:
                                 monitoring_active = True
-                                log("🤖 TG CMD", "/start received — monitoring RESUMED")
+                                log("🤖 TG CMD", "/s received — monitoring RESUMED")
                                 await tg_reply(session, chat_id,
                                     "✅ <b>Monitor STARTED</b>\n"
                                     f"<code>Interval: {INTERVAL}s</code>\n"
-                                    "Send /stop to pause.")
+                                    "Send /f to stop.")
 
-                        elif text in ("/stop", "/stop@" + TG_TOKEN.split(":")[0]):
+                        elif text in ("/f", "/f@" + TG_TOKEN.split(":")[0]):
                             if not monitoring_active:
                                 await tg_reply(session, chat_id,
                                     "⚠️ <b>Monitor is already stopped.</b>\n"
-                                    "Send /start to resume.")
+                                    "Send /s to resume.")
                             else:
                                 monitoring_active = False
-                                log("🤖 TG CMD", "/stop received — monitoring PAUSED")
+                                log("🤖 TG CMD", "/f received — monitoring PAUSED")
                                 await tg_reply(session, chat_id,
                                     "🛑 <b>Monitor STOPPED</b>\n"
-                                    "Send /start to resume.")
+                                    "Send /s to resume.")
 
                         elif text == "/status":
                             state = "🟢 RUNNING" if monitoring_active else "🔴 STOPPED"
