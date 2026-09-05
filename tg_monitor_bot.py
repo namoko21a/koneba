@@ -29,6 +29,11 @@ INTERVAL   = 30
 TG_TOKEN   = "8889006993:AAEmCC3idYlvUK1hMP-c2Qtp_U2fGKVKQQo"
 TG_CHAT_ID = "5295241896"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+TG_UPDATES = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+
+# ─── Bot control state ───────────────────────────────────────────────────────
+monitoring_active: bool = False   # True while the monitoring loop should run
+_last_update_id:   int  = 0       # Tracks Telegram long-poll offset
 
 LOGIN_URL  = "https://www.hexmos.cfd/app-server/app/v1/user/login"
 SAVE_OPT   = "https://www.hexmos.cfd/app-server/app/v1/account/saveOpt"
@@ -461,14 +466,106 @@ async def run_web_server():
 # ─── Entry point ────────────────────────────────────────────────────────────
 
 async def monitoring_loop(auth_state: dict):
+    """Runs monitoring cycles while monitoring_active is True.
+    Sleeps in short increments so /stop takes effect quickly."""
+    global monitoring_active
     cycle = 0
     while True:
+        if not monitoring_active:
+            await asyncio.sleep(2)      # idle — wait for /start
+            continue
         cycle += 1
         await run_cycle(auth_state, cycle)
-        await asyncio.sleep(INTERVAL)
+        # Sleep in 2-second ticks so /stop is responsive
+        for _ in range(INTERVAL // 2):
+            if not monitoring_active:
+                break
+            await asyncio.sleep(2)
+
+
+# ─── Telegram command polling ────────────────────────────────────────────────
+
+async def tg_reply(session: aiohttp.ClientSession, chat_id, text: str):
+    """Send a reply to a specific chat (used by command handler)."""
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    try:
+        async with session.post(TG_API, json=payload) as resp:
+            if resp.status != 200:
+                log("TG CMD", f"Reply failed: {resp.status}")
+    except Exception as e:
+        log("TG CMD", f"Reply error: {e}")
+
+
+async def telegram_command_loop():
+    """Poll Telegram for /start and /stop commands from the owner chat."""
+    global monitoring_active, _last_update_id
+    log("🤖 TG CMD", "Command listener started — send /start or /stop")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                params = {"timeout": 20, "offset": _last_update_id + 1}
+                async with session.get(TG_UPDATES, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(5)
+                        continue
+                    data = await resp.json()
+                    updates = data.get("result", [])
+                    for update in updates:
+                        _last_update_id = update["update_id"]
+                        message = update.get("message") or update.get("channel_post", {})
+                        if not message:
+                            continue
+                        chat_id = str(message.get("chat", {}).get("id", ""))
+                        text    = message.get("text", "").strip().lower()
+
+                        # Only accept commands from the authorised chat
+                        if chat_id != TG_CHAT_ID:
+                            continue
+
+                        if text in ("/start", "/start@" + TG_TOKEN.split(":")[0]):
+                            if monitoring_active:
+                                await tg_reply(session, chat_id,
+                                    "⚠️ <b>Monitor is already running.</b>\n"
+                                    "Send /stop to pause it.")
+                            else:
+                                monitoring_active = True
+                                log("🤖 TG CMD", "/start received — monitoring RESUMED")
+                                await tg_reply(session, chat_id,
+                                    "✅ <b>Monitor STARTED</b>\n"
+                                    f"<code>Interval: {INTERVAL}s</code>\n"
+                                    "Send /stop to pause.")
+
+                        elif text in ("/stop", "/stop@" + TG_TOKEN.split(":")[0]):
+                            if not monitoring_active:
+                                await tg_reply(session, chat_id,
+                                    "⚠️ <b>Monitor is already stopped.</b>\n"
+                                    "Send /start to resume.")
+                            else:
+                                monitoring_active = False
+                                log("🤖 TG CMD", "/stop received — monitoring PAUSED")
+                                await tg_reply(session, chat_id,
+                                    "🛑 <b>Monitor STOPPED</b>\n"
+                                    "Send /start to resume.")
+
+                        elif text == "/status":
+                            state = "🟢 RUNNING" if monitoring_active else "🔴 STOPPED"
+                            cycle = LATEST_DATA.get("cycle", 0)
+                            ts    = LATEST_DATA.get("timestamp") or "—"
+                            await tg_reply(session, chat_id,
+                                f"<b>▌ BOT STATUS</b>\n"
+                                f"  Monitor  :  <b>{state}</b>\n"
+                                f"  Cycle    :  <b>#{cycle}</b>\n"
+                                f"  Last run :  <b>{ts}</b>")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log("TG CMD", f"Poll error: {e}")
+                await asyncio.sleep(5)
 
 
 async def main():
+    global monitoring_active
     auth_token, device_id = login()
     save_opt, phone_auth  = build_payloads(device_id)
 
@@ -479,10 +576,15 @@ async def main():
         "phone_auth": phone_auth,
     }
 
-    # Run the monitoring loop AND the web server concurrently
+    # Start paused — user must send /start from Telegram
+    monitoring_active = False
+    log("🤖 BOT", "Send /start in Telegram to begin monitoring.")
+
+    # Run monitoring loop, web server, and Telegram command listener concurrently
     await asyncio.gather(
         monitoring_loop(auth_state),
         run_web_server(),
+        telegram_command_loop(),
     )
 
 
